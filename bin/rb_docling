@@ -1,0 +1,63 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# rb_docling - CLI
+# Usage:
+#   rb_docling PDF_FILE [--layout heuristic|onnx] [--table heuristic|onnx]
+#              [--out md|json|chunks] [--models DIR]
+#
+# Esempio:
+#   PDFIUM_LIBRARY_PATH=/path/to/libpdfium.so \
+#   ruby -I lib bin/rb_docling input.pdf --out md
+
+require "optparse"
+require "json"
+
+# Aggiungi lib/ al load path se non già presente
+$LOAD_PATH.unshift File.expand_path("../lib", __dir__) unless $LOAD_PATH.include?(File.expand_path("../lib", __dir__))
+
+require "rb_docling"
+
+options = {
+  layout: :heuristic,
+  table: :heuristic,
+  out: :md,
+  models: RbDocling.default_models_dir,
+  max_tokens: 512,
+  min_tokens: 64
+}
+
+OptionParser.new do |opts|
+  opts.banner = "Usage: rb_docling PDF_FILE [options]"
+  opts.on("--layout MODE", %i[heuristic onnx], "Layout engine (heuristic|onnx)") { |v| options[:layout] = v }
+  opts.on("--table MODE", %i[heuristic onnx], "Table engine (heuristic|onnx)") { |v| options[:table] = v }
+  opts.on("--out FMT", %i[md json chunks], "Output format (md|json|chunks)") { |v| options[:out] = v }
+  opts.on("--models DIR", "Cartella con i .onnx") { |v| options[:models] = v }
+  opts.on("--max-tokens N", Integer, "Max token per chunk (default 512)") { |v| options[:max_tokens] = v }
+  opts.on("--min-tokens N", Integer, "Min token per chunk (default 64)")  { |v| options[:min_tokens] = v }
+  opts.on("-h", "--help") do
+    puts opts; exit 0
+  end
+end.parse!
+
+pdf = ARGV[0]
+abort "Usage: rb_docling PDF_FILE [options]" if pdf.nil? || !File.exist?(pdf)
+
+tree = RbDocling.parse(pdf,
+                       layout: options[:layout],
+                       table: options[:table],
+                       models_dir: options[:models])
+
+case options[:out]
+when :md
+  puts tree.to_md
+when :json
+  puts JSON.pretty_generate(tree.to_h)
+when :chunks
+  chunker = RbDocling::Chunking::HybridChunker.new(
+    max_tokens: options[:max_tokens],
+    min_tokens: options[:min_tokens]
+  )
+  chunks = chunker.chunk(tree)
+  puts JSON.pretty_generate(chunks)
+end
