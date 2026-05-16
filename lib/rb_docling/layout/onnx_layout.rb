@@ -80,8 +80,11 @@ module RbDocling
         detections = parse_outputs(result, pad_info: pad_info,
                                    orig_w_pt: page_w_pt, orig_h_pt: page_h_pt)
 
-        # 4. Per ogni detection, ricava il testo dentro la bbox
-        detections.map do |d|
+        # 4. Per ogni detection, ricava il testo dentro la bbox.
+        # detection_index: posizione nell'output del modello, usata da
+        # ReadingOrder.sort_by_ml. RT-DETR/DocLayNet emette detection in
+        # un ordine che approssima il reading order su layout tipici.
+        detections.each_with_index.map do |d, i|
           text = text_in_bbox(page, d[:bbox])
           {
             type: d[:type],
@@ -92,7 +95,8 @@ module RbDocling
             weight: nil,
             level: d[:type] == :section_header ? 2 : nil,
             page_no: page_no,
-            score: d[:score]
+            score: d[:score],
+            detection_index: i
           }
         end
       end

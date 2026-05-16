@@ -14,6 +14,7 @@ module RbDocling
           @mutex.synchronize do
             @sessions[path] ||= begin
               raise Error, "Modello non trovato: #{path}" unless File.exist?(path)
+              require "onnxruntime"
               OnnxRuntime::InferenceSession.new(path)
             end
           end

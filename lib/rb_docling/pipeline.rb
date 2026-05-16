@@ -6,13 +6,14 @@ module RbDocling
   class Pipeline
     def initialize(layout: :heuristic, table: :heuristic, models_dir: nil,
                    layout_model: nil, tableformer_encoder: nil,
-                   tableformer_decoder: nil)
+                   tableformer_decoder: nil, reading_order: :auto)
       @layout_mode = layout
       @table_mode  = table
       @models_dir  = models_dir
       @layout_model_path = layout_model || (models_dir && File.join(models_dir, "layout.onnx"))
       @tableformer_encoder_path = tableformer_encoder || (models_dir && File.join(models_dir, "tableformer_encoder.onnx"))
       @tableformer_decoder_path = tableformer_decoder || (models_dir && File.join(models_dir, "tableformer_decoder.onnx"))
+      @reading_order_strategy = reading_order
 
       @layout_engine = build_layout_engine
       @table_engine  = build_table_engine
@@ -49,8 +50,15 @@ module RbDocling
             }
           end
 
-          # 5. Reading order
-          ordered = Layout::ReadingOrder.sort(blocks)
+          # 5. Reading order — cascata struct-tree → ML → geometric.
+          # I blocchi ML hanno già :detection_index propagato da OnnxLayout.
+          ml_output = @layout_engine.is_a?(Layout::OnnxLayout) ? blocks : nil
+          ordered = Layout::ReadingOrder.sort(
+            blocks,
+            page: page,
+            ml_output: ml_output,
+            strategy: @reading_order_strategy
+          )
 
           # 6. Costruisci nodi
           ordered.each do |b|

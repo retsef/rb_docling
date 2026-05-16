@@ -8,7 +8,6 @@
 #   logica Ruby → reading order, document tree, hybrid chunker
 
 require "rpdfium"
-require "onnxruntime"
 
 require_relative "rb_docling/version"
 require_relative "rb_docling/document/bbox"

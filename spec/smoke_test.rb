@@ -93,6 +93,172 @@ small_tree = RbDocling::Document::Tree.new(nodes: [
 small_chunks = RbDocling::Chunking::HybridChunker.new(max_tokens: 200, min_tokens: 50).chunk(small_tree)
 assert small_chunks.size <= 2, "chunks piccoli adiacenti vengono fusi"
 
+section "ReadingOrder strategies"
+
+BB = RbDocling::Document::BBox
+
+def mock_block(idx, x0:, top:, x1: nil, bottom: nil, text: "block#{idx}", **extra)
+  x1 ||= x0 + 100
+  bottom ||= top + 20
+  {
+    type: :text,
+    text: text,
+    bbox: BB.new(x0: x0, top: top, x1: x1, bottom: bottom)
+  }.merge(extra)
+end
+
+# Mock minimo di Page + Tree + Element per testare sort_by_struct_tree
+# senza dover generare un PDF tagged a runtime (complesso e fragile).
+class MockObj
+  attr_reader :address
+  def initialize(address) = (@address = address)
+end
+
+class MockElement
+  attr_reader :marked_content_ids, :children
+  def initialize(mcids: [], children: [])
+    @marked_content_ids = mcids
+    @children = children
+  end
+
+  def walk(&block)
+    return enum_for(:walk) unless block
+    yield self
+    @children.each { |c| c.walk(&block) }
+  end
+end
+
+class MockTree
+  attr_reader :root_count
+  def initialize(roots:, empty: false)
+    @roots = roots
+    @empty = empty
+  end
+  def empty? = @empty
+  def walk(&block)
+    return enum_for(:walk) unless block
+    @roots.each { |r| r.walk(&block) }
+  end
+end
+
+class MockPage
+  def initialize(chars:, regions:, tree:)
+    @chars = chars
+    @regions = regions
+    @tree = tree
+  end
+  def chars = @chars
+  def marked_content_regions = @regions
+  def struct_tree
+    if block_given?
+      yield @tree
+    else
+      @tree
+    end
+  end
+end
+
+# Helper: char con text_obj_id + bbox
+def mock_char(text_obj_id:, x:, y:)
+  {
+    text_obj_id: text_obj_id,
+    x0: x, x1: x + 5,
+    top: y, bottom: y + 10
+  }
+end
+
+# T1: struct-tree riordina secondo i tag, ignorando l'ordine geometrico
+# Scenario: tre blocchi, ordinati geometricamente sarebbero A→B→C ma il
+# tagged PDF dichiara ordine C→A→B.
+obj_a = MockObj.new(0xA000)
+obj_b = MockObj.new(0xB000)
+obj_c = MockObj.new(0xC000)
+chars_t1 = [
+  # Blocco A copre (0,0)-(100,20)
+  mock_char(text_obj_id: 0xA000, x: 10, y: 5),
+  # Blocco B copre (0,50)-(100,70)
+  mock_char(text_obj_id: 0xB000, x: 10, y: 55),
+  # Blocco C copre (0,100)-(100,120)
+  mock_char(text_obj_id: 0xC000, x: 10, y: 105)
+]
+regions_t1 = { 10 => [obj_a], 20 => [obj_b], 30 => [obj_c] }
+# Tree dichiara ordine: C (mcid 30) prima, poi A (mcid 10), poi B (mcid 20)
+tree_t1 = MockTree.new(roots: [
+  MockElement.new(mcids: [30]),
+  MockElement.new(mcids: [10]),
+  MockElement.new(mcids: [20])
+])
+page_t1 = MockPage.new(chars: chars_t1, regions: regions_t1, tree: tree_t1)
+blocks_t1 = [
+  mock_block("A", x0: 0, top: 0, bottom: 20),
+  mock_block("B", x0: 0, top: 50, bottom: 70),
+  mock_block("C", x0: 0, top: 100, bottom: 120)
+]
+ordered_t1 = RbDocling::Layout::ReadingOrder.sort(blocks_t1, page: page_t1)
+assert ordered_t1[0][:text] == "blockC", "T1: struct-tree mette C per primo"
+assert ordered_t1[1][:text] == "blockA", "T1: A secondo"
+assert ordered_t1[2][:text] == "blockB", "T1: B terzo"
+
+# T2: tree vuoto → fallback geometric, ordine top-to-bottom
+empty_tree = MockTree.new(roots: [], empty: true)
+page_t2 = MockPage.new(chars: [], regions: {}, tree: empty_tree)
+blocks_t2 = [
+  mock_block("Z", x0: 0, top: 100, bottom: 120),
+  mock_block("Y", x0: 0, top: 50, bottom: 70),
+  mock_block("X", x0: 0, top: 0, bottom: 20)
+]
+ordered_t2 = RbDocling::Layout::ReadingOrder.sort(blocks_t2, page: page_t2)
+assert ordered_t2.map { |b| b[:text] } == %w[blockX blockY blockZ],
+       "T2: tree empty → fallback geometric top-to-bottom"
+
+# T3: pagina untagged (tree nil) → fallback geometric
+page_t3 = MockPage.new(chars: [], regions: {}, tree: nil)
+ordered_t3 = RbDocling::Layout::ReadingOrder.sort(blocks_t2, page: page_t3)
+assert ordered_t3.map { |b| b[:text] } == %w[blockX blockY blockZ],
+       "T3: tree nil → fallback geometric"
+
+# T4: blocco orfano (no MCID match) → accodato dopo i blocchi con tag
+chars_t4 = [
+  mock_char(text_obj_id: 0xA000, x: 10, y: 5),
+  mock_char(text_obj_id: 0xB000, x: 10, y: 55)
+  # nessun char per blocco C → C resta orfano
+]
+regions_t4 = { 10 => [MockObj.new(0xA000)], 20 => [MockObj.new(0xB000)] }
+tree_t4 = MockTree.new(roots: [
+  MockElement.new(mcids: [10]),
+  MockElement.new(mcids: [20])
+])
+page_t4 = MockPage.new(chars: chars_t4, regions: regions_t4, tree: tree_t4)
+blocks_t4 = [
+  mock_block("A", x0: 0, top: 0, bottom: 20),
+  mock_block("B", x0: 0, top: 50, bottom: 70),
+  mock_block("C-orphan", x0: 0, top: 100, bottom: 120) # no char in bbox
+]
+ordered_t4 = RbDocling::Layout::ReadingOrder.sort(blocks_t4, page: page_t4)
+assert ordered_t4.map { |b| b[:text] } == %w[blockA blockB blockC-orphan],
+       "T4: orfano (no MCID) accodato dopo i blocchi con tag"
+
+# T5: strategy: :geometric forzato → bypassa struct-tree anche se presente
+ordered_t5 = RbDocling::Layout::ReadingOrder.sort(blocks_t1, page: page_t1, strategy: :geometric)
+# Geometric col1 top→bottom: A, B, C (ignora il tree)
+assert ordered_t5.map { |b| b[:text] } == %w[blockA blockB blockC],
+       "T5: strategy: :geometric bypassa struct-tree"
+
+# T6: backward-compat → ReadingOrder.sort(blocks) senza kwargs come prima
+ordered_t6 = RbDocling::Layout::ReadingOrder.sort(blocks_t1)
+assert ordered_t6.map { |b| b[:text] } == %w[blockA blockB blockC],
+       "T6: backward-compat sort(blocks) → geometric"
+
+# T7: sort_by_ml usa :detection_index
+blocks_t7 = [
+  mock_block("D2", x0: 0, top: 50, bottom: 70, detection_index: 2),
+  mock_block("D0", x0: 0, top: 100, bottom: 120, detection_index: 0),
+  mock_block("D1", x0: 0, top: 0, bottom: 20, detection_index: 1)
+]
+ordered_t7 = RbDocling::Layout::ReadingOrder.sort(blocks_t7, ml_output: blocks_t7, strategy: :ml)
+assert ordered_t7.map { |b| b[:text] } == %w[blockD0 blockD1 blockD2],
+       "T7: ML strategy ordina per detection_index"
+
 section "Pipeline ONNX (se modello presente)"
 models_dir = "/home/claude/rb_docling/models"
 if File.exist?(File.join(models_dir, "layout.onnx"))
