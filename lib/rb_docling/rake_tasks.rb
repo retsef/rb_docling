@@ -27,7 +27,7 @@ module RbDocling
   #   models:clean              # rimuove i .onnx scaricati
   #
   # Override (env var):
-  #   RB_DOCLING_HF_REPO=scinoky/rb-docling-onnx     # repo HuggingFace di default
+  #   RB_DOCLING_HF_REPO=scinoky/rb_docling-onnx     # repo HuggingFace di default
   #   RB_DOCLING_HF_REVISION=main                       # branch/tag/commit
   #   RB_DOCLING_LAYOUT_URL=https://...                 # URL completa per file singolo
   #   RB_DOCLING_TF_ENCODER_URL=...
