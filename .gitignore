@@ -1,4 +1,8 @@
 .idea
+.vscode
+
+.bundle
+.venv
 
 tmp/
 

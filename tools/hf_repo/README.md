@@ -68,7 +68,7 @@ puts tree.to_md
 To re-build from the official PyTorch weights:
 
 ```bash
-git clone https://github.com/robertoscinocca/rb_docling
+git clone https://github.com/scinoky/rb_docling
 cd rb_docling
 pip install -r tools/requirements.txt
 python tools/export_layout.py

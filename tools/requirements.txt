@@ -18,9 +18,11 @@ huggingface_hub>=0.23
 safetensors>=0.4
 
 # Architetture custom (TableFormer, Heron layout)
-# Pin di sicurezza: rilasci ds4sd recenti possono introdurre breaking change
-# nel naming dei moduli (vedi export_*.py per i punti TODO da rivisitare).
 docling-ibm-models>=2.0
+
+# Dipendenze transitive di docling-ibm-models non dichiarate nel suo setup:
+# cv2 è importato da tf_predictor.py al top-level.
+opencv-python-headless>=4.8
 
 # Utility per il diagnostic dump dei grafi ONNX
 onnx-simplifier>=0.4

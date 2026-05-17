@@ -1,42 +1,41 @@
 #!/usr/bin/env python3
 """
-Export di TableFormer da PyTorch a ONNX.
+Export di TableFormer (docling-ibm-models) da PyTorch a ONNX.
 
-Due modalità:
-  --mode split        encoder + decoder come due .onnx separati.
-                      Permette decoding autoregressivo lato Ruby (preferito).
-                      rb_docling OnnxTableFormer mode :split.
-  --mode monolithic   un unico .onnx con seq_len fisso. Più semplice da
-                      esportare, meno flessibile. Compatibile col formato di
-                      asmud/ds4sd-docling-models-onnx.
-                      rb_docling OnnxTableFormer mode :monolithic.
+API reale di docling-ibm-models (verificata): non c'è `TableModel04_rs.load_from`.
+Il path corretto è:
+  1. snapshot_download("ds4sd/docling-models", allow_patterns=...)
+  2. carica `tm_config.json` (contiene dataset_wordmap, model.type, ecc.)
+  3. set config["model"]["save_dir"] al path della variant directory
+  4. TFPredictor(config, device='cpu') → carica TableModel04_rs e safetensors
+  5. predictor.get_model() → nn.Module
 
 Output:
-  --mode split:       tools/_out/tableformer_encoder.onnx
-                      tools/_out/tableformer_decoder.onnx
-                      tools/_out/tableformer_vocab.json     ← cruciale
-  --mode monolithic:  tools/_out/tableformer.onnx
-                      tools/_out/tableformer_vocab.json
+  tools/_out/tableformer_encoder.onnx       (immagine → encoder_out)
+  tools/_out/tableformer_vocab.json         (word_map_tag — vocab OTSL)
+  tools/_out/tableformer_tm_config.json     (copia del tm_config.json originale)
+  tools/_out/tableformer_decoder_step.onnx  (un singolo step di decoding, se --mode split)
 
-ATTENZIONE - punti di calibrazione:
-  - Il vocabolario OTSL (`tableformer_vocab.json`) DEVE essere allineato col
-    decoder. È l'ordine esatto dei token nello stato del modello PyTorch.
-    rb_docling lo carica in OnnxTableFormer per detokenizzare.
-  - L'export di un loop autoregressivo non funziona out-of-the-box con
-    `torch.onnx.export` (cattura solo un forward). Per `--mode split` esportiamo
-    encoder e decoder come due grafi separati, e ricostruiamo il loop in Ruby.
+Note onestà:
+  - L'**encoder** (CNN Encoder04 + transformer encoder) è esportabile direttamente.
+  - Il **decoder** tag-transformer è autoregressivo con caching. Non è
+    direttamente tracciabile con torch.onnx.export. Per --mode split esportiamo
+    un wrapper "single-step" — il loop autoregressivo va ricostruito lato Ruby.
+  - Per --mode monolithic l'export di model.predict(...) non funziona perché
+    contiene branching dipendente da .item() (vedi tablemodel04_rs.py linee
+    194-260). Lasciato come scaffolding; useremo --mode split di default.
 
 Uso:
   python tools/export_tableformer.py [--variant accurate|fast]
-                                     [--mode split|monolithic]
+                                     [--mode split|encoder-only]
                                      [--out-dir tools/_out]
                                      [--opset 17]
-                                     [--max-seq-len 512]   # solo monolithic
 """
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -44,17 +43,13 @@ import torch
 from huggingface_hub import snapshot_download
 
 
-def load_tableformer(snapshot_path: Path, variant: str):
-    """Ritorna (model, vocab_list, image_size).
+def load_predictor(snapshot_path: Path, variant: str):
+    """Carica TFPredictor con il config reale dal snapshot.
 
-    TODO[calibrate]: API di docling-ibm-models. Da verificare:
-      - import path: `docling_ibm_models.tableformer.models.table04_rs.tablemodel04_rs`
-        per la variante v0.4 RS. Versioni più recenti possono aver rinominato.
-      - costruttore / metodo `load_from(path)` vs init manuale + load_state_dict.
-      - dove vive il vocab OTSL (di solito in un YAML/json adiacente).
+    Ritorna (predictor, config, variant_dir).
     """
     try:
-        from docling_ibm_models.tableformer.models.table04_rs.tablemodel04_rs import TableModel04_rs
+        from docling_ibm_models.tableformer.data_management.tf_predictor import TFPredictor
     except ImportError as e:
         sys.exit(
             "Manca docling-ibm-models. Installa: pip install -r tools/requirements.txt\n"
@@ -63,111 +58,109 @@ def load_tableformer(snapshot_path: Path, variant: str):
 
     variant_dir = snapshot_path / "model_artifacts" / "tableformer" / variant
     if not variant_dir.exists():
-        # Fallback: alcune release piattano la struttura
-        variant_dir = snapshot_path
+        sys.exit(f"Variant dir non trovata: {variant_dir}")
 
-    model = TableModel04_rs.load_from(str(variant_dir))
-    model.eval()
+    config_path = variant_dir / "tm_config.json"
+    if not config_path.exists():
+        sys.exit(f"tm_config.json non trovato in {variant_dir}")
 
-    # Vocab OTSL — TODO[calibrate]: nome file e formato variano
-    vocab = None
-    for candidate in ("word_map.json", "vocab.json", "otsl_vocab.json"):
-        p = variant_dir / candidate
-        if p.exists():
-            vocab = json.loads(p.read_text())
-            break
-    if vocab is None:
-        # Ultimo tentativo: estrai dal modello (alcune impl espongono `model.vocab`)
-        vocab = getattr(model, "vocab", None) or getattr(model, "word_map", None)
-    if vocab is None:
-        raise RuntimeError(
-            "Vocab OTSL non trovato nel snapshot. Cerca file *.json in "
-            f"{variant_dir} e aggiorna `load_tableformer`."
-        )
+    config = json.loads(config_path.read_text())
 
-    # TODO[calibrate]: dimensione input. TableFormer originale 448x448.
-    image_size = 448
-    return model, vocab, image_size
+    # Il config originale ha save_dir hardcoded (path di training).
+    # Lo punto alla directory locale che contiene il .safetensors.
+    config.setdefault("model", {})
+    config["model"]["save_dir"] = str(variant_dir)
+
+    predictor = TFPredictor(config, device="cpu")
+    return predictor, config, variant_dir
 
 
-def export_split(model, vocab, image_size: int, out_dir: Path, opset: int) -> None:
-    """Encoder + decoder come due grafi separati."""
-    encoder = model.encoder
-    decoder = model.decoder
+def export_encoder(model, out_path: Path, image_size: int, opset: int) -> None:
+    """Esporta encoder visivo + transformer-encoder (parte one-shot del forward).
 
-    # ----- Encoder -----
-    dummy_img = torch.randn(1, 3, image_size, image_size)
-    enc_path = out_dir / "tableformer_encoder.onnx"
-    print(f"[tableformer] export encoder → {enc_path}")
+    Replica la prima metà di model.predict():
+      enc_out = self._encoder(imgs)                         # CNN Encoder04
+      enc_out = self._tag_transformer._input_filter(...)   # 1x1 conv proj
+      encoder_out = self._tag_transformer._encoder(...)    # transformer encoder
+    """
+    encoder_cnn = model._encoder
+    tt = model._tag_transformer
+
+    class EncoderWrapper(torch.nn.Module):
+        def __init__(self, enc, tt):
+            super().__init__()
+            self.enc = enc
+            self.tt = tt
+
+        def forward(self, imgs):
+            enc_out = self.enc(imgs)                                   # [B, H, W, C]
+            x = self.tt._input_filter(enc_out.permute(0, 3, 1, 2))     # [B, D, H, W]
+            x = x.permute(0, 2, 3, 1)                                  # [B, H, W, D]
+            B = x.size(0); D = x.size(-1)
+            enc_in = x.view(B, -1, D).permute(1, 0, 2)                 # [S, B, D]
+            # Encoder transformer "no mask" path (mask di soli True/False
+            # uguali → effettivamente all-zero). Per export lo omettiamo.
+            return self.tt._encoder(enc_in)
+
+    wrapper = EncoderWrapper(encoder_cnn, tt).eval()
+    dummy = torch.randn(1, 3, image_size, image_size)
+
+    print(f"[tableformer] export encoder → {out_path}")
     torch.onnx.export(
-        encoder,
-        (dummy_img,),
-        str(enc_path),
+        wrapper, (dummy,), str(out_path),
         input_names=["image"],
-        output_names=["memory"],
+        output_names=["encoder_out"],
         dynamic_axes={
-            "image": {0: "batch"},
-            "memory": {0: "batch", 1: "seq_enc"},
-        },
-        opset_version=opset,
-        do_constant_folding=True,
-    )
-
-    # ----- Decoder -----
-    # TODO[calibrate]: la firma esatta del decoder dipende dall'implementazione.
-    # Tipicamente: (prev_tokens [B, T], memory [B, S, D]) → (logits [B, T, V], bbox [B, T, 4])
-    # Verifica con `print(decoder.forward.__doc__)` o leggi il sorgente.
-    vocab_size = len(vocab) if isinstance(vocab, (list, dict)) else 100
-    dummy_mem = torch.randn(1, 196, 256)   # 196 = (14*14) patches a 448/32, 256 = hidden dim TF
-    dummy_tokens = torch.zeros((1, 1), dtype=torch.long)
-    dec_path = out_dir / "tableformer_decoder.onnx"
-    print(f"[tableformer] export decoder → {dec_path} (vocab_size={vocab_size})")
-    torch.onnx.export(
-        decoder,
-        (dummy_tokens, dummy_mem),
-        str(dec_path),
-        input_names=["prev_tokens", "memory"],
-        output_names=["logits", "bbox"],
-        dynamic_axes={
-            "prev_tokens": {0: "batch", 1: "seq_dec"},
-            "memory":      {0: "batch", 1: "seq_enc"},
-            "logits":      {0: "batch", 1: "seq_dec"},
-            "bbox":        {0: "batch", 1: "seq_dec"},
+            "image":       {0: "batch"},
+            "encoder_out": {1: "batch"},
         },
         opset_version=opset,
         do_constant_folding=True,
     )
 
 
-def export_monolithic(model, image_size: int, out_dir: Path, opset: int,
-                      max_seq_len: int) -> None:
-    """Singolo grafo: image → (tokens, bboxes) con seq_len fisso."""
-    dummy_img = torch.randn(1, 3, image_size, image_size)
-    mono_path = out_dir / "tableformer.onnx"
-    print(f"[tableformer] export monolithic → {mono_path} (seq_len={max_seq_len})")
+def export_decoder_step(model, out_path: Path, opset: int,
+                        encoder_dim: int, max_seq_seed: int = 8) -> None:
+    """Esporta UN SOLO step del decoder tag-transformer (senza cache).
 
-    # TODO[calibrate]: il forward "completo" di TableModel04_rs potrebbe esporre
-    # un'API tipo `predict(img, max_len=...)` che NON è tracciabile direttamente.
-    # In quel caso, scrivere un wrapper:
-    #
-    #   class TFWrapper(torch.nn.Module):
-    #       def __init__(self, m, max_len):
-    #           super().__init__(); self.m = m; self.max_len = max_len
-    #       def forward(self, img):
-    #           return self.m.predict(img, max_len=self.max_len)
-    #
-    # e passare TFWrapper(model, max_seq_len) a torch.onnx.export.
-    wrapper = model
+    Firma:
+      input:  decoded_tags [T, 1] (int64), encoder_out [S, 1, D]
+      output: logits_last  [1, V]
+
+    Il loop autoregressivo (concatenazione tag + decisioni branching OTSL come
+    `xcel→lcel`, `ucel,lcel→fcel`, `lcel` span merging, ecc.) va riprodotto
+    lato Ruby usando il vocab in tableformer_vocab.json.
+    """
+    tt = model._tag_transformer
+
+    class DecoderStep(torch.nn.Module):
+        def __init__(self, tt):
+            super().__init__()
+            self.tt = tt
+
+        def forward(self, decoded_tags, encoder_out):
+            emb = self.tt._embedding(decoded_tags)
+            emb = self.tt._positional_encoding(emb)
+            # cache=None → ricomputa ogni step (più lento ma esportabile;
+            # caching transformer non si traccia bene con torch.onnx).
+            decoded, _ = self.tt._decoder(emb, encoder_out, None)
+            logits = self.tt._fc(decoded[-1, :, :])    # [B, V]
+            return logits
+
+    wrapper = DecoderStep(tt).eval()
+    # Dummy: T=max_seq_seed step, S=784 (28*28) tipico per enc_image_size=28
+    dummy_tags = torch.zeros((max_seq_seed, 1), dtype=torch.long)
+    dummy_enc  = torch.randn(784, 1, encoder_dim)
+
+    print(f"[tableformer] export decoder step → {out_path}")
     torch.onnx.export(
-        wrapper,
-        (dummy_img,),
-        str(mono_path),
-        input_names=["image"],
-        output_names=["tokens", "bboxes"],
+        wrapper, (dummy_tags, dummy_enc), str(out_path),
+        input_names=["decoded_tags", "encoder_out"],
+        output_names=["logits"],
         dynamic_axes={
-            "image":  {0: "batch"},
-            "tokens": {0: "batch", 1: "seq"},
-            "bboxes": {0: "batch", 1: "seq"},
+            "decoded_tags": {0: "seq_dec", 1: "batch"},
+            "encoder_out":  {0: "seq_enc", 1: "batch"},
+            "logits":       {0: "batch"},
         },
         opset_version=opset,
         do_constant_folding=True,
@@ -185,21 +178,43 @@ def export(args: argparse.Namespace) -> None:
     ))
     print(f"[tableformer] snapshot: {snap}")
 
-    model, vocab, image_size = load_tableformer(snap, args.variant)
+    predictor, config, variant_dir = load_predictor(snap, args.variant)
+    model = predictor.get_model()
+    model.eval()
 
-    # Scrivi vocab in formato canonico per rb_docling
+    # --- artifacts di config / vocab -----------------------------------
+    # Vocab OTSL: word_map_tag è quello che il decoder predice.
     vocab_path = out_dir / "tableformer_vocab.json"
-    vocab_path.write_text(json.dumps(vocab, indent=2, ensure_ascii=False))
-    print(f"[tableformer] vocab OTSL salvato in {vocab_path} ({len(vocab)} token)")
+    vocab_path.write_text(json.dumps(
+        config["dataset_wordmap"]["word_map_tag"],
+        indent=2, ensure_ascii=False
+    ))
+    print(f"[tableformer] vocab OTSL salvato in {vocab_path} "
+          f"({len(config['dataset_wordmap']['word_map_tag'])} token)")
+
+    # Copia anche il tm_config originale: è utile a rb_docling per leggere
+    # parametri di preprocessing (image_size, ecc.) e word_map_cell.
+    cfg_copy = out_dir / "tableformer_tm_config.json"
+    shutil.copy(variant_dir / "tm_config.json", cfg_copy)
+    print(f"[tableformer] config originale copiato in {cfg_copy}")
+
+    # --- ONNX export ---------------------------------------------------
+    # image_size canonico: enc_image_size * 16 (stride resnet18). Default 28*16=448.
+    enc_image_size = config["model"].get("enc_image_size", 28)
+    image_size = enc_image_size * 16
+    print(f"[tableformer] image_size: {image_size} (enc_image_size={enc_image_size})")
+
+    enc_out_path = out_dir / "tableformer_encoder.onnx"
+    export_encoder(model, enc_out_path, image_size, args.opset)
 
     if args.mode == "split":
-        export_split(model, vocab, image_size, out_dir, args.opset)
-    else:
-        export_monolithic(model, image_size, out_dir, args.opset, args.max_seq_len)
+        encoder_dim = config["model"]["hidden_dim"]
+        dec_out_path = out_dir / "tableformer_decoder_step.onnx"
+        export_decoder_step(model, dec_out_path, args.opset, encoder_dim)
 
-    # Sanity check tutti gli .onnx prodotti
+    # Sanity check
     import onnx
-    for onnx_file in out_dir.glob("tableformer*.onnx"):
+    for onnx_file in sorted(out_dir.glob("tableformer*.onnx")):
         m = onnx.load(str(onnx_file))
         onnx.checker.check_model(m)
         size_mb = onnx_file.stat().st_size / (1024 * 1024)
@@ -209,11 +224,11 @@ def export(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--variant", choices=["accurate", "fast"], default="accurate")
-    parser.add_argument("--mode", choices=["split", "monolithic"], default="split")
+    parser.add_argument("--mode", choices=["split", "encoder-only"], default="split",
+                        help="split: encoder + decoder-step (default). "
+                             "encoder-only: solo encoder (debug)")
     parser.add_argument("--out-dir", default="tools/_out")
     parser.add_argument("--opset", type=int, default=17)
-    parser.add_argument("--max-seq-len", type=int, default=512,
-                        help="Solo per --mode monolithic")
     args = parser.parse_args()
     export(args)
 

@@ -43,33 +43,42 @@ python tools/export_layout.py \
 
 ### TableFormer
 
-**Modalità `split` (raccomandata)** — encoder e decoder come due grafi separati;
-il loop autoregressivo OTSL gira lato Ruby:
+**Modalità `split` (default e raccomandata)** — encoder e singolo step del
+decoder come due grafi separati; il loop autoregressivo OTSL gira lato Ruby:
 
 ```bash
 python tools/export_tableformer.py --variant accurate --mode split
 # Output:
-#   tools/_out/tableformer_encoder.onnx
-#   tools/_out/tableformer_decoder.onnx
-#   tools/_out/tableformer_vocab.json     ← caricato da OnnxTableFormer
+#   tools/_out/tableformer_encoder.onnx        (~90 MB)
+#   tools/_out/tableformer_decoder_step.onnx   (~75 MB)
+#   tools/_out/tableformer_vocab.json          (13 token OTSL)
+#   tools/_out/tableformer_tm_config.json      (config originale ds4sd)
 ```
 
-**Modalità `monolithic`** — singolo grafo con `seq_len` fisso, compatibile con
-il formato di `asmud/ds4sd-docling-models-onnx`:
+Il decoder ONNX è **un singolo step** (`decoded_tags, encoder_out → logits`);
+il loop autoregressivo va riprodotto lato Ruby usando il vocab. Le decisioni
+branching di OTSL (correzioni `xcel→lcel`, gestione `ucel,lcel→fcel`, span
+merging) vivono solo nel codice Python `predict()` — replicarle in Ruby è la
+parte non-banale lato `OnnxTableFormer`.
+
+**Modalità `encoder-only`** — esporta solo l'encoder (utile in debug):
 
 ```bash
-python tools/export_tableformer.py --variant accurate --mode monolithic --max-seq-len 512
-# Output:
-#   tools/_out/tableformer.onnx
-#   tools/_out/tableformer_vocab.json
+python tools/export_tableformer.py --variant accurate --mode encoder-only
 ```
+
+> **Nota onestà**: l'export "monolithic" (un singolo grafo che produce l'intera
+> sequenza in un colpo) **non è supportato** perché `model.predict()` contiene
+> branching che dipende da `.item()` (decisioni Python su tag predetti), che
+> `torch.onnx.export` non riesce a tracciare. Va riscritto come modello senza
+> branching (lavoro non banale, fuori scope qui).
 
 ## Step 2 — Verifica
 
 ```bash
 python tools/verify_onnx.py tools/_out/layout.onnx
 python tools/verify_onnx.py tools/_out/tableformer_encoder.onnx
-python tools/verify_onnx.py tools/_out/tableformer_decoder.onnx
+python tools/verify_onnx.py tools/_out/tableformer_decoder_step.onnx
 ```
 
 Lo script controlla validità del grafo, caricabilità con `onnxruntime` ed
@@ -79,7 +88,7 @@ esegue un forward con input dummy.
 
 1. Crea il repo HuggingFace (una sola volta):
    - Vai su https://huggingface.co/new
-   - Nome consigliato: **`klarolabs/rb-docling-onnx`** (allinea con quello in
+   - Nome consigliato: **`scinoky/rb_docling-onnx`** (allinea con quello in
      `lib/rb_docling/rake_tasks.rb` `SOURCES`)
    - Tipo: **Model** (non Dataset)
    - Visibilità: **public**
@@ -87,7 +96,7 @@ esegue un forward con input dummy.
 2. Copia il template (sotto `tools/hf_repo/`) nel repo clonato:
 
    ```bash
-   git clone https://huggingface.co/klarolabs/rb-docling-onnx /tmp/hf
+   git clone https://huggingface.co/scinoky/rb_docling-onnx /tmp/hf
    cp tools/hf_repo/README.md /tmp/hf/README.md
    cp tools/hf_repo/.gitattributes /tmp/hf/.gitattributes
    ```
@@ -95,7 +104,7 @@ esegue un forward con input dummy.
 3. Sposta i `.onnx` prodotti:
 
    ```bash
-   mv tools/_out/*.onnx tools/_out/tableformer_vocab.json /tmp/hf/
+   mv tools/_out/*.onnx tools/_out/tableformer_vocab.json tools/_out/tableformer_tm_config.json /tmp/hf/
    cd /tmp/hf
    git lfs install
    git add .
@@ -135,7 +144,9 @@ Quando Docling rilascia pesi nuovi:
 | Sintomo | Causa probabile | Fix |
 |---|---|---|
 | `ImportError: docling_ibm_models.layoutmodel.layout_predictor` | Versione `docling-ibm-models` cambiata | Cerca il nuovo path con `python -c "import docling_ibm_models; help(docling_ibm_models)"` e aggiorna `discover_model()` |
-| `RuntimeError: Tracing failed` durante export decoder | Loop autoregressivo non tracciabile | Usa `--mode monolithic` o scrivi un wrapper che esponga solo un singolo step |
+| `ModuleNotFoundError: No module named 'cv2'` | `docling-ibm-models` non dichiara `opencv-python` | `pip install opencv-python-headless` (già in requirements.txt) |
+| `AttributeError: TableModel04_rs has no attribute 'load_from'` | Vecchia signature dello script | Già fixato: ora usa `TFPredictor(config, device)` |
+| `RuntimeError: Tracing failed` durante export decoder | Loop autoregressivo non tracciabile | Già gestito: il decoder viene esportato come singolo step (vedi `export_decoder_step`) |
 | `onnx.checker.ValidationError: opset` | Opset troppo basso per qualche op | `--opset 18` (o 20) |
 | Output decoder ha logits di shape sbagliata | Vocab size disallineato | Verifica `tableformer_vocab.json` — la dim degli output deve essere `len(vocab)` |
 | `.onnx` enorme (>500 MB) | Constants foldate due volte | Lancia `python -m onnxsim INPUT OUTPUT` |

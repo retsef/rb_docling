@@ -55,9 +55,9 @@ module RbDocling
         url_env:     "RB_DOCLING_TF_ENCODER_URL"
       },
       tableformer_decoder: {
-        hf_path:     "tableformer_decoder.onnx",
-        filename:    "tableformer_decoder.onnx",
-        description: "TableFormer decoder (autoregressive, OTSL vocabulary)",
+        hf_path:     "tableformer_decoder_step.onnx",
+        filename:    "tableformer_decoder_step.onnx",
+        description: "TableFormer decoder single-step (loop autoregressivo in Ruby)",
         url_env:     "RB_DOCLING_TF_DECODER_URL"
       },
       tableformer_vocab: {
@@ -65,6 +65,12 @@ module RbDocling
         filename:    "tableformer_vocab.json",
         description: "TableFormer OTSL vocabulary (richiesto dal decoder)",
         url_env:     "RB_DOCLING_TF_VOCAB_URL"
+      },
+      tableformer_tm_config: {
+        hf_path:     "tableformer_tm_config.json",
+        filename:    "tableformer_tm_config.json",
+        description: "TableFormer config originale ds4sd (word_map_cell, predict params)",
+        url_env:     "RB_DOCLING_TF_CONFIG_URL"
       }
     }.freeze
 
@@ -82,8 +88,9 @@ module RbDocling
             fetch_one(:layout)
           end
 
-          desc "Scarica TableFormer completo (encoder + decoder + vocab)"
-          task tableformer: %i[tableformer_encoder tableformer_decoder tableformer_vocab]
+          desc "Scarica TableFormer completo (encoder + decoder_step + vocab + tm_config)"
+          task tableformer: %i[tableformer_encoder tableformer_decoder
+                               tableformer_vocab tableformer_tm_config]
 
           desc "Scarica solo il TableFormer encoder"
           task :tableformer_encoder do
@@ -98,6 +105,11 @@ module RbDocling
           desc "Scarica il vocab OTSL di TableFormer (richiesto dal decoder)"
           task :tableformer_vocab do
             fetch_one(:tableformer_vocab)
+          end
+
+          desc "Scarica il tm_config.json originale di TableFormer"
+          task :tableformer_tm_config do
+            fetch_one(:tableformer_tm_config)
           end
         end
 
