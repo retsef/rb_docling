@@ -212,16 +212,27 @@ module RbDocling
 
     # Download HTTP con follow di redirect (HuggingFace risponde 302 verso CDN).
     # Stream su disco con progress su stderr ogni 5 MB.
+    #
+    # Risolve i Location header relativi rispetto all'URI corrente (RFC 3986)
+    # — HuggingFace CDN a volte ritorna path-only o senza scheme.
     def download(url, dest, max_redirects: 6)
       uri = URI(url)
       max_redirects.times do
+        unless uri.is_a?(URI::HTTP) || uri.is_a?(URI::HTTPS)
+          raise "URI non HTTP(S): #{uri.inspect}"
+        end
+        raise "URI senza host: #{uri.inspect}" if uri.host.nil? || uri.host.empty?
+
         Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
           http.request(Net::HTTP::Get.new(uri)) do |res|
             case res
             when Net::HTTPSuccess
               return stream_to_file(res, dest)
             when Net::HTTPRedirection
-              uri = URI(res["location"])
+              location = res["location"]
+              raise "Redirect HTTP #{res.code} senza header Location" if location.nil? || location.empty?
+              # uri.merge gestisce sia URL assolute sia path/relative
+              uri = uri.merge(location)
               break # ricomincia con nuova URI
             else
               raise "HTTP #{res.code} #{res.message}"

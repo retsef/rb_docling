@@ -7,11 +7,29 @@ Versioning: [SemVer](https://semver.org/lang/it/).
 
 ## [Unreleased]
 
-## [0.2.2] — 2026-05-17
+## [0.2.3] — 2026-05-17
 
 ### Fixed
 
-- Default endpoint hugginface
+- **Download fallisce con `Connection refused to :80` su HuggingFace**:
+  `RbDocling::RakeTasks.download` non gestiva i Location header relativi
+  o path-only ritornati dalla CDN HuggingFace dopo il primo 302. Il
+  redirect veniva parsato come URI senza host, e il tentativo successivo
+  apriva una connessione TCP verso host vuoto sulla porta 80.
+  - Fix: usare `uri.merge(location)` per la risoluzione RFC 3986 relativa
+    all'URI corrente (gestisce sia URL assolute sia path-only).
+  - Validazione aggiuntiva: errori espliciti se l'URI non è HTTP(S),
+    se manca l'host, o se il redirect non ha header `Location`.
+  - Verificato con `RB_DOCLING_TF_VOCAB_URL=https://huggingface.co/...`
+    su un file reale dietro CDN HF.
+
+## [0.2.2] — 2026-05-17
+
+### Changed
+
+- `DEFAULT_HF_REPO` in [`lib/rb_docling/rake_tasks.rb`](lib/rb_docling/rake_tasks.rb)
+  da `klarolabs/rb-docling-onnx` a `scinoky/rb_docling-onnx` (allineamento
+  con il repo HuggingFace effettivamente utilizzato).
 
 ## [0.2.1] — 2026-05-17
 
@@ -137,7 +155,9 @@ Versioning: [SemVer](https://semver.org/lang/it/).
 - Documentazione: ARCHITECTURE, DESIGN_DECISIONS, COMPARISON_DOCLING,
   ROADMAP, ENVIRONMENT, RESOURCES, BENCHMARK
 
-[Unreleased]: https://github.com/retsef/rb_docling/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/retsef/rb_docling/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/retsef/rb_docling/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/retsef/rb_docling/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/retsef/rb_docling/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/retsef/rb_docling/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/retsef/rb_docling/releases/tag/v0.1.0
