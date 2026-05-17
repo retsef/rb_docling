@@ -7,6 +7,57 @@ Versioning: [SemVer](https://semver.org/lang/it/).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-17
+
+### Fixed
+
+- `tools/export_tableformer.py` usava `TableModel04_rs.load_from(...)` che
+  non esiste nella API reale di `docling-ibm-models`. Riscritto con il path
+  corretto via `TFPredictor(config, device)`:
+  1. `snapshot_download("ds4sd/docling-models", allow_patterns=...)`
+  2. carica `tm_config.json` dal snapshot
+  3. `config["model"]["save_dir"] = variant_dir`
+  4. `TFPredictor(config, device='cpu')` → carica safetensors
+  5. `predictor.get_model()` → `nn.Module`
+- Verificato end-to-end sulla variant `accurate`: produce
+  `tableformer_encoder.onnx` (~91 MB) e `tableformer_decoder_step.onnx`
+  (~75 MB) caricabili con `onnxruntime`.
+
+### Changed
+
+- **Rinominato** `tableformer_decoder.onnx` → `tableformer_decoder_step.onnx`
+  in `SOURCES` di [`lib/rb_docling/rake_tasks.rb`](lib/rb_docling/rake_tasks.rb).
+  Il nome riflette che il file contiene **un singolo step** del decoder
+  autoregressivo, non l'intero loop. Override env var:
+  `RB_DOCLING_TF_DECODER_URL` (invariata).
+- Rimosso il mode `monolithic` da `export_tableformer.py`: l'export
+  dell'intero `model.predict()` non funziona perché contiene branching su
+  `.item()` non tracciabile da `torch.onnx.export`. Lasciato `split`
+  (default) e `encoder-only` (debug).
+- Nuovo mode `encoder-only` su `export_tableformer.py` per debug isolato
+  dell'encoder.
+
+### Added
+
+- Nuovo artefatto scaricabile: `tableformer_tm_config.json` (copia del
+  `tm_config.json` originale ds4sd). Contiene `word_map_cell` (281
+  caratteri) e i parametri di preprocess. Necessario al loop autoregressivo
+  Ruby per ricostruire la stringa OTSL → HTML.
+- Nuovo task: `rake models:fetch:tableformer_tm_config`.
+- `opencv-python-headless` in `tools/requirements.txt` — dipendenza
+  transitive di `docling-ibm-models` (importato in `tf_predictor.py`) non
+  dichiarata nel suo setup.
+
+### Notes
+
+- `OnnxTableFormer` lato Ruby deve replicare il loop autoregressivo OTSL
+  (vedi `tablemodel04_rs.py:175-264` in `docling-ibm-models`). Il singolo
+  step ONNX espone `(decoded_tags, encoder_out) → logits`; le correzioni
+  di struttura OTSL (`xcel→lcel`, `ucel,lcel→fcel`, span merging) sono
+  in `tableformer_vocab.json` + logica Ruby da scrivere.
+- `BBoxDecoder` non ancora esportato in ONNX — va aggiunto come terzo
+  `.onnx` quando si implementa il loop Ruby.
+
 ## [0.2.0] — 2026-05-17
 
 ### Added
@@ -80,6 +131,7 @@ Versioning: [SemVer](https://semver.org/lang/it/).
 - Documentazione: ARCHITECTURE, DESIGN_DECISIONS, COMPARISON_DOCLING,
   ROADMAP, ENVIRONMENT, RESOURCES, BENCHMARK
 
-[Unreleased]: https://github.com/retsef/rb_docling/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/retsef/rb_docling/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/retsef/rb_docling/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/retsef/rb_docling/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/retsef/rb_docling/releases/tag/v0.1.0
