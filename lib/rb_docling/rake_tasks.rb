@@ -10,6 +10,10 @@ require "json"
 module RbDocling
   # Rake tasks per scaricare e gestire i modelli ONNX di Docling.
   #
+  # I .onnx ufficiali NON sono disponibili sui repo HuggingFace di IBM/ds4sd
+  # (che pubblica solo PyTorch). rb_docling usa un repo dedicato di conversioni
+  # pre-compilate; lo script che le genera è in `tools/` (vedi tools/README.md).
+  #
   # Uso (in un Rakefile):
   #
   #   require "rb_docling/rake_tasks"
@@ -17,40 +21,50 @@ module RbDocling
   #
   # Tasks esposti:
   #   models:fetch              # scarica tutti i modelli (layout + tableformer)
-  #   models:fetch:layout       # solo layout (DocLayNet RT-DETR)
-  #   models:fetch:tableformer  # solo TableFormer (encoder + decoder)
+  #   models:fetch:layout       # solo layout (DocLayNet Heron RT-DETR)
+  #   models:fetch:tableformer  # solo TableFormer (encoder + decoder + vocab)
   #   models:list               # elenca i file modello attesi e il loro stato
   #   models:clean              # rimuove i .onnx scaricati
   #
-  # Override delle URL via env var:
-  #   RB_DOCLING_LAYOUT_URL=https://...     rake models:fetch:layout
-  #   RB_DOCLING_TF_ENCODER_URL=https://...
-  #   RB_DOCLING_TF_DECODER_URL=https://...
-  #   RB_DOCLING_MODELS_DIR=./custom/path   (default: ./models)
+  # Override (env var):
+  #   RB_DOCLING_HF_REPO=klarolabs/rb-docling-onnx     # repo HuggingFace di default
+  #   RB_DOCLING_HF_REVISION=main                       # branch/tag/commit
+  #   RB_DOCLING_LAYOUT_URL=https://...                 # URL completa per file singolo
+  #   RB_DOCLING_TF_ENCODER_URL=...
+  #   RB_DOCLING_TF_DECODER_URL=...
+  #   RB_DOCLING_TF_VOCAB_URL=...
+  #   RB_DOCLING_MODELS_DIR=./custom/path               # default: ./models
+  #   FORCE=1                                           # riscarica anche se presente
   module RakeTasks
-    # Sorgenti note. Documentate ma NON garantite — le release ONNX di
-    # Docling cambiano spesso. Override via env var (vedi sopra) se le URL
-    # non rispondono o se vuoi puntare a una variante diversa.
-    #
-    # IMPORTANT (CLAUDE.md/honest scaffolding): queste URL sono PLACEHOLDER
-    # ragionevoli basati su repository pubblici HuggingFace; vanno verificate
-    # all'uso. Se i download falliscono, l'utente deve scaricare manualmente
-    # i file e posizionarli in `models/` con i nomi attesi (vedi models:list).
+    # Repo HuggingFace che ospita i .onnx pre-convertiti.
+    # I file sono prodotti dagli script in `tools/`.
+    DEFAULT_HF_REPO     = "klarolabs/rb-docling-onnx"
+    DEFAULT_HF_REVISION = "main"
+
     SOURCES = {
       layout: {
-        url: "https://huggingface.co/ds4sd/docling-layout-heron-101/resolve/main/model.onnx",
-        filename: "layout.onnx",
-        description: "DocLayNet RT-DETR layout detector (Heron-101 variant)"
+        hf_path:     "layout.onnx",
+        filename:    "layout.onnx",
+        description: "DocLayNet Heron RT-DETR layout detector",
+        url_env:     "RB_DOCLING_LAYOUT_URL"
       },
       tableformer_encoder: {
-        url: "https://huggingface.co/ds4sd/docling-tableformer-accurate/resolve/main/encoder.onnx",
-        filename: "tableformer_encoder.onnx",
-        description: "TableFormer encoder (accurate variant)"
+        hf_path:     "tableformer_encoder.onnx",
+        filename:    "tableformer_encoder.onnx",
+        description: "TableFormer encoder (accurate variant)",
+        url_env:     "RB_DOCLING_TF_ENCODER_URL"
       },
       tableformer_decoder: {
-        url: "https://huggingface.co/ds4sd/docling-tableformer-accurate/resolve/main/decoder.onnx",
-        filename: "tableformer_decoder.onnx",
-        description: "TableFormer decoder (autoregressive, OTSL vocabulary)"
+        hf_path:     "tableformer_decoder.onnx",
+        filename:    "tableformer_decoder.onnx",
+        description: "TableFormer decoder (autoregressive, OTSL vocabulary)",
+        url_env:     "RB_DOCLING_TF_DECODER_URL"
+      },
+      tableformer_vocab: {
+        hf_path:     "tableformer_vocab.json",
+        filename:    "tableformer_vocab.json",
+        description: "TableFormer OTSL vocabulary (richiesto dal decoder)",
+        url_env:     "RB_DOCLING_TF_VOCAB_URL"
       }
     }.freeze
 
@@ -59,17 +73,17 @@ module RbDocling
     def install
       extend Rake::DSL
       namespace :models do
-        desc "Scarica tutti i modelli ONNX di Docling (layout + tableformer)"
+        desc "Scarica tutti i modelli ONNX di Docling (layout + tableformer + vocab)"
         task fetch: %w[fetch:layout fetch:tableformer]
 
         namespace :fetch do
-          desc "Scarica il modello layout (DocLayNet RT-DETR)"
+          desc "Scarica il modello layout (DocLayNet Heron RT-DETR)"
           task :layout do
             fetch_one(:layout)
           end
 
-          desc "Scarica i modelli TableFormer (encoder + decoder)"
-          task tableformer: %i[tableformer_encoder tableformer_decoder]
+          desc "Scarica TableFormer completo (encoder + decoder + vocab)"
+          task tableformer: %i[tableformer_encoder tableformer_decoder tableformer_vocab]
 
           desc "Scarica solo il TableFormer encoder"
           task :tableformer_encoder do
@@ -80,6 +94,11 @@ module RbDocling
           task :tableformer_decoder do
             fetch_one(:tableformer_decoder)
           end
+
+          desc "Scarica il vocab OTSL di TableFormer (richiesto dal decoder)"
+          task :tableformer_vocab do
+            fetch_one(:tableformer_vocab)
+          end
         end
 
         desc "Elenca i modelli attesi e il loro stato (presente/mancante)"
@@ -87,7 +106,7 @@ module RbDocling
           list_models
         end
 
-        desc "Rimuove tutti i .onnx scaricati in #{models_dir}"
+        desc "Rimuove tutti i modelli scaricati in #{models_dir}"
         task :clean do
           clean_models
         end
@@ -117,12 +136,14 @@ module RbDocling
     rescue StandardError => e
       warn "[error] download fallito per #{key}: #{e.message}"
       warn "        Suggerimento: scaricalo manualmente e posizionalo in #{dest}"
-      warn "        oppure passa una URL alternativa via env var (vedi rake -D models:fetch:#{key})"
+      warn "        oppure punta a una URL alternativa: #{spec[:url_env]}=https://..."
+      warn "        oppure cambia repo HF: RB_DOCLING_HF_REPO=user/repo"
       raise
     end
 
     def list_models
       puts "Models directory: #{models_dir}"
+      puts "HF source:        #{hf_repo}@#{hf_revision}"
       puts ""
       SOURCES.each do |key, spec|
         path = File.join(models_dir, spec[:filename])
@@ -130,7 +151,7 @@ module RbDocling
           puts "  [ok]      #{spec[:filename].ljust(32)} #{format_size(File.size(path))}  #{spec[:description]}"
         else
           puts "  [missing] #{spec[:filename].ljust(32)} #{'-'.ljust(10)}  #{spec[:description]}"
-          puts "            url override: #{env_var_for(key)}"
+          puts "            override: #{spec[:url_env]}=https://..."
         end
       end
       puts ""
@@ -159,16 +180,22 @@ module RbDocling
       ENV["RB_DOCLING_MODELS_DIR"] || File.expand_path("models", Dir.pwd)
     end
 
-    def url_for(key, spec)
-      ENV[env_var_for(key)] || spec[:url]
+    def hf_repo
+      ENV["RB_DOCLING_HF_REPO"] || DEFAULT_HF_REPO
     end
 
-    def env_var_for(key)
-      case key
-      when :layout              then "RB_DOCLING_LAYOUT_URL"
-      when :tableformer_encoder then "RB_DOCLING_TF_ENCODER_URL"
-      when :tableformer_decoder then "RB_DOCLING_TF_DECODER_URL"
-      end
+    def hf_revision
+      ENV["RB_DOCLING_HF_REVISION"] || DEFAULT_HF_REVISION
+    end
+
+    # URL effettiva per un modello. Priorità:
+    #   1. URL completa via env var (es. RB_DOCLING_LAYOUT_URL=https://...)
+    #   2. Costruita da hf_repo + hf_revision + hf_path
+    def url_for(_key, spec)
+      override = ENV[spec[:url_env]]
+      return override if override && !override.empty?
+
+      "https://huggingface.co/#{hf_repo}/resolve/#{hf_revision}/#{spec[:hf_path]}"
     end
 
     # Download HTTP con follow di redirect (HuggingFace risponde 302 verso CDN).

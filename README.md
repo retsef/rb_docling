@@ -126,6 +126,11 @@ ruby -I lib bin/rb_docling input.pdf --out md
 I pesi non sono versionati — vanno scaricati separatamente. Sono **opzionali**:
 la modalità `:heuristic` (default) non li usa.
 
+I repository HuggingFace ufficiali di IBM/ds4sd pubblicano solo pesi PyTorch.
+rb_docling usa un **repo dedicato di conversioni ONNX pre-compilate**:
+[`klarolabs/rb-docling-onnx`](https://huggingface.co/klarolabs/rb-docling-onnx).
+Gli script Python che generano le conversioni vivono in [`tools/`](tools/README.md).
+
 ### Scaricare via rake
 
 ```bash
@@ -136,33 +141,38 @@ bundle exec rake models:fetch:tableformer
 bundle exec rake models:clean           # rimuove i .onnx scaricati
 ```
 
-Override URL (le release ONNX di Docling cambiano nel tempo):
+Override comuni:
 
 ```bash
-RB_DOCLING_LAYOUT_URL=https://huggingface.co/.../model.onnx \
+# Cambia repo HuggingFace
+RB_DOCLING_HF_REPO=tuo-user/tuo-repo bundle exec rake models:fetch
+
+# Cambia revision (default: main)
+RB_DOCLING_HF_REVISION=v1.0 bundle exec rake models:fetch
+
+# URL completa per singolo file (bypassa il repo)
+RB_DOCLING_LAYOUT_URL=https://example.com/layout.onnx \
   bundle exec rake models:fetch:layout
-```
 
-Cambia destinazione:
-
-```bash
+# Destinazione locale
 RB_DOCLING_MODELS_DIR=/var/lib/rb_docling/models bundle exec rake models:fetch
+
+# Forza re-download
+FORCE=1 bundle exec rake models:fetch
 ```
 
-Vedi [`models/README.md`](models/README.md) per dettagli su filename attesi,
-calibrazione del vocabolario OTSL per TableFormer e dimensioni indicative.
+Vedi [`models/README.md`](models/README.md) per dettagli su filename attesi e
+dimensioni indicative, e [`tools/README.md`](tools/README.md) per la procedura
+di conversione PyTorch → ONNX (utile se vuoi auto-ospitare le conversioni).
 
-### Sorgenti
+### File attesi
 
-| Modello | Repo HuggingFace | Filename atteso |
+| Filename | Sorgente PyTorch | Note |
 |---|---|---|
-| Layout (DocLayNet RT-DETR) | `ds4sd/docling-layout-heron-101` | `layout.onnx` |
-| TableFormer encoder | `ds4sd/docling-tableformer-accurate` | `tableformer_encoder.onnx` |
-| TableFormer decoder | `ds4sd/docling-tableformer-accurate` | `tableformer_decoder.onnx` |
-
-**Nota**: queste URL sono il default best-effort; verificare sempre la
-disponibilità su HuggingFace. In caso di URL invalida, scaricare manualmente
-e posizionare il file con il nome atteso in `models/`.
+| `layout.onnx` | `ds4sd/docling-layout-heron-101` | Heron RT-DETR, 11 classi DocLayNet |
+| `tableformer_encoder.onnx` | `ds4sd/docling-models` (`tableformer/accurate`) | image → memory |
+| `tableformer_decoder.onnx` | idem | autoregressivo, decoding lato Ruby |
+| `tableformer_vocab.json` | derivato dal checkpoint | vocabolario OTSL del decoder |
 
 ## Reading order: tre strategie a cascata
 
@@ -300,6 +310,11 @@ completa di gap rispetto a Docling.
 │   ├── rake_tasks.rb           # task `models:*` per scaricare i pesi
 │   └── pipeline.rb             # orchestratore
 ├── models/                    # pesi .onnx (non versionati, vedi models/README.md)
+├── tools/                     # script Python per conversione PyTorch → ONNX
+│   ├── export_layout.py
+│   ├── export_tableformer.py
+│   ├── verify_onnx.py
+│   └── hf_repo/               # template del repo HuggingFace (README + .gitattributes)
 ├── spec/
 │   ├── smoke_test.rb          # 41 test (no rspec, plain Ruby)
 │   └── fixtures/              # PDF di esempio
