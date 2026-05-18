@@ -6,7 +6,7 @@ sono versionati (vedi `.gitignore`); vanno scaricati separatamente.
 > **Nota importante**: i repository HuggingFace ufficiali di IBM/ds4sd
 > (`ds4sd/docling-models`, `ds4sd/docling-layout-heron-101`) pubblicano **solo
 > pesi PyTorch**. rb_docling usa un **repo separato di conversioni ONNX
-> pre-compilate**: [`klarolabs/rb-docling-onnx`](https://huggingface.co/klarolabs/rb-docling-onnx)
+> pre-compilate**: [`scinoky/rb_docling-onnx`](https://huggingface.co/scinoky/rb_docling-onnx)
 > (default; ridefinibile via `RB_DOCLING_HF_REPO`).
 >
 > Le conversioni le genera il maintainer con gli script in [`tools/`](../tools/README.md).
@@ -36,7 +36,7 @@ bundle exec rake models:fetch:tableformer
 ### Override
 
 ```bash
-# Cambia repo HuggingFace (default: klarolabs/rb-docling-onnx)
+# Cambia repo HuggingFace (default: scinoky/rb_docling-onnx)
 RB_DOCLING_HF_REPO=tuo-user/tuo-repo bundle exec rake models:fetch
 
 # Cambia revision (default: main)
