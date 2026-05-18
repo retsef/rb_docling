@@ -26,10 +26,9 @@ module RbDocling
         nodes = nodes.reject { |n| %i[page_header page_footer].include?(n.type) } unless include_furniture
         nodes = associate_captions(nodes) if associate_captions
 
-        lines = nodes.map do |n|
-          strict_text ? n.text.to_s : n.to_md
-        end
-        lines.reject { |l| l.nil? || l.empty? }.join(strict_text ? "\n\n" : "\n\n")
+        lines ||= nodes.map { it.text.to_s } if strict_text
+        lines ||= nodes.map(&:to_md)
+        lines.reject { |l| l.nil? || l.empty? }.join("\n\n")
       end
 
       def to_h

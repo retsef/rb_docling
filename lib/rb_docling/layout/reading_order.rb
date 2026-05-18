@@ -62,11 +62,8 @@ module RbDocling
           if ordered.any?
             # Orfani: prova ML se disponibile, altrimenti geometric, e
             # vengono accodati dopo i blocchi posizionati dal tree.
-            fallback = if ml_output
-                         sort_by_ml(orphans, ml_output)
-                       else
-                         sort_geometric(orphans)
-                       end
+            fallback ||= sort_by_ml(orphans, ml_output) if ml_output
+            fallback ||= sort_geometric(orphans)
             return ordered + fallback
           end
         end

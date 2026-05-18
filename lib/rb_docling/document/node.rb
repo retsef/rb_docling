@@ -56,27 +56,12 @@ module RbDocling
       # Markdown leggibile per debugging
       def to_md
         case @type
-        when :title
-          "# #{@text}"
-        when :section_header
-          ("#" * ([(@level || 2) + 1, 6].min)) + " #{@text}"
-        when :list_item
-          # Rimuovi bullet duplicato in testa (•, ·, ▪, -, *) se presente
-          clean = @text.to_s.sub(/\A\s*[•·▪\-\*]\s*/, "")
-          indent = "  " * ((@metadata[:list_level] || 1) - 1)
-          "#{indent}- #{clean}"
-        when :caption
-          "_#{@text}_"
-        when :table
-          render_table_md
-        when :picture
-          alt = @metadata[:caption] || "image"
-          img = @metadata[:image_path] || @metadata[:image_uri] || "#"
-          if @metadata[:caption]
-            "![#{alt}](#{img})\n\n_#{@metadata[:caption]}_"
-          else
-            "![#{alt}](#{img})"
-          end
+        when :title then "# #{@text}"
+        when :section_header then ("#" * ([(@level || 2) + 1, 6].min)) + " #{@text}"
+        when :list_item then render_list_item_md
+        when :caption then "_#{@text}_"
+        when :table then render_table_md
+        when :picture then render_picture_md
         else
           @text.to_s
         end
@@ -86,15 +71,36 @@ module RbDocling
 
       def render_table_md
         return "" unless @table_structure && @table_structure[:rows]
+
         rows = @table_structure[:rows]
         return "" if rows.empty?
+
         head = rows.first
         body = rows[1..] || []
+
         lines = []
         lines << "| #{head.map(&:to_s).join(' | ')} |"
         lines << "| #{head.map { '---' }.join(' | ')} |"
+
         body.each { |r| lines << "| #{r.map(&:to_s).join(' | ')} |" }
+
         lines.join("\n")
+      end
+
+      def render_picture_md
+        alt = @metadata[:caption] || "image"
+        img = @metadata[:image_path] || @metadata[:image_uri] || "#"
+
+        return "![#{alt}](#{img})\n\n_#{@metadata[:caption]}_" if @metadata[:caption]
+
+        "![#{alt}](#{img})"
+      end
+
+      def render_list_item_md
+        # Rimuovi bullet duplicato in testa (•, ·, ▪, -, *) se presente
+        clean = @text.to_s.sub(/\A\s*[•·▪\-\*]\s*/, "")
+        indent = "  " * ((@metadata[:list_level] || 1) - 1)
+        "#{indent}- #{clean}"
       end
     end
   end

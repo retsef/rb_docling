@@ -18,7 +18,7 @@ require_relative "rb_docling/layout/heuristic_layout"
 require_relative "rb_docling/layout/onnx_layout"
 require_relative "rb_docling/layout/reading_order"
 require_relative "rb_docling/table/heuristic_table"
-require_relative "rb_docling/table/onnx_tableformer"
+require_relative "rb_docling/table/onnx_table_former"
 require_relative "rb_docling/chunking/hybrid_chunker"
 require_relative "rb_docling/pipeline"
 
