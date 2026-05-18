@@ -260,13 +260,58 @@ assert ordered_t7.map { |b| b[:text] } == %w[blockD0 blockD1 blockD2],
        "T7: ML strategy ordina per detection_index"
 
 section "Pipeline ONNX (se modello presente)"
-models_dir = "/home/claude/rb_docling/models"
+models_dir = File.expand_path("../models", __dir__)
 if File.exist?(File.join(models_dir, "layout.onnx"))
   tree_onnx = RbDocling.parse(pdf, layout: :onnx, models_dir: models_dir)
   assert tree_onnx.is_a?(RbDocling::Document::Tree), "ONNX pipeline produce un tree"
   assert !tree_onnx.nodes.empty?, "ONNX tree non vuoto"
+
+  # Verifica che il pipeline ONNX produca davvero detection del layout (non solo
+  # nodi tabella ereditati dall'heuristic). Il bug noto era: il modello emette
+  # `logits` (raw scores per query) invece di `labels` (argmax pre-calcolato),
+  # e l'estrattore non sapeva interpretarli → output con sole tabelle heuristic.
+  non_table_nodes = tree_onnx.nodes.reject { |n| n.type == :table }
+  assert !non_table_nodes.empty?,
+         "ONNX pipeline produce detection oltre alle tabelle " \
+         "(regression test per bug logits non gestiti)"
+
+  # Verifica che almeno un nodo abbia uno score (proviene dal layout ML)
+  assert tree_onnx.nodes.any? { |n| n.metadata[:score] },
+         "almeno una detection ha metadata[:score] dal modello ML"
 else
   puts "  (skip: nessun modello ONNX in #{models_dir})"
+end
+
+# Test unit di OnnxLayout#extract_from_logits indipendentemente dal modello.
+# Verifica che logits+pred_boxes vengano correttamente convertiti in
+# labels/boxes/scores via argmax + sigmoid.
+section "OnnxLayout extract_from_logits"
+# Costruisco una OnnxLayout senza model (uso send per il metodo privato)
+if File.exist?(File.join(models_dir, "layout.onnx"))
+  layout_engine = RbDocling::Layout::OnnxLayout.new(
+    model_path: File.join(models_dir, "layout.onnx")
+  )
+
+  # Simulo output di 3 query con logits dummy
+  fake_logits = [[
+    [-5.0, -3.0, -1.0, 8.0,  -2.0, 0.0,  1.0, -1.0, -3.0, -2.0, -4.0], # argmax=3, sigmoid(8)~1.0
+    [2.0,  -1.0, -2.0, -3.0, -1.0, -2.0, 0.0, -1.0, -2.0, -3.0, -2.0], # argmax=0, sigmoid(2)~0.88
+    [-10.0]*11 # tutti molto bassi
+  ]]
+  fake_logits[0][2][0] = -8.0 # già: argmax=0 con score sigmoid(-8) molto basso
+
+  fake_boxes = [[
+    [0.5, 0.1, 0.4, 0.05],
+    [0.5, 0.3, 0.6, 0.08],
+    [0.5, 0.5, 0.5, 0.1]
+  ]]
+
+  labels, boxes, scores = layout_engine.send(:extract_from_logits, fake_logits, fake_boxes)
+  assert labels == [3, 0, 0], "argmax corretto su 3 query"
+  assert scores[0] > 0.999, "sigmoid(8) ≈ 1.0"
+  assert scores[1] > 0.85 && scores[1] < 0.92, "sigmoid(2) ≈ 0.88"
+  assert scores[2] < 0.01, "sigmoid(-8) ≈ 0"
+  assert boxes.size == 3, "boxes inalterati"
 end
 
 puts ""

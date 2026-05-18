@@ -198,11 +198,22 @@ module RbDocling
       end
 
       # Interpreta gli output del modello.
-      # Diverse esportazioni ONNX di RT-DETR usano nomi/format diversi.
-      # Cerchiamo di essere robusti.
+      # Supporta due formati di esportazione ONNX comuni:
+      #
+      #   Formato A (RT-DETR "classico" post-processed):
+      #     labels  int64[N]    — class indices già argmax
+      #     boxes   float32[N, 4]
+      #     scores  float32[N]  — confidenze 0..1
+      #
+      #   Formato B (RT-DETRv2 "raw"):
+      #     logits     float32[1, num_queries, num_classes]  — raw
+      #     pred_boxes float32[1, num_queries, 4]            — cxcywh_norm
+      #     (nessun output `scores`: vanno calcolati con sigmoid(logits))
+      #
+      # È il formato che produce `tools/export_layout.py` per il modello Heron
+      # di Docling. La sigmoid (non softmax) è l'attivazione corretta perché
+      # RT-DETRv2 usa focal loss su classi indipendenti.
       def parse_outputs(result, pad_info:, orig_w_pt:, orig_h_pt:)
-        # result è Array di output, nello stesso ordine di @output_specs
-        # Mappiamo per nome
         outputs_by_name = {}
         @output_specs.each_with_index do |spec, i|
           outputs_by_name[spec[:name]] = result[i]
@@ -239,34 +250,85 @@ module RbDocling
       end
 
       def extract_lbs(out)
-        # Cerca per nome convenzionale, fallback su shape
+        # Tentativo 1: formato classico con `labels`/`boxes`/`scores` separati.
         labels = out["labels"] || out["pred_labels"] || out["classes"]
-        boxes  = out["boxes"]  || out["pred_boxes"]  || out["bboxes"]
+        boxes  = out["boxes"]  || out["bboxes"]
         scores = out["scores"] || out["pred_scores"] || out["confidences"]
 
-        # Fallback: se non riconosce i nomi, prova per shape
-        if labels.nil? || boxes.nil? || scores.nil?
-          out.each do |name, v|
-            shape = array_shape(v)
-            case shape.size
-            when 1
-              if v.first.is_a?(Integer)
-                labels ||= v
-              else
-                scores ||= v
-              end
-            when 2
-              boxes ||= v if shape[1] == 4
+        if labels && boxes && scores
+          return [unwrap_batch(labels), unwrap_batch(boxes), unwrap_batch(scores)]
+        end
+
+        # Tentativo 2: formato RT-DETRv2 raw (logits + pred_boxes).
+        logits = out["logits"]
+        pred_boxes = out["pred_boxes"] || boxes
+
+        if logits && pred_boxes
+          return extract_from_logits(logits, pred_boxes)
+        end
+
+        # Tentativo 3: fallback by-shape su 3 tensori non riconosciuti.
+        # Cerco un tensore 3D di forma [B, Q, C] con C ≥ 2 e uno 3D [B, Q, 4]
+        # come logits + pred_boxes implicit.
+        candidate_logits, candidate_boxes = nil, nil
+        out.each_value do |v|
+          shape = array_shape(v)
+          if shape.size == 3 && shape[2] >= 5
+            candidate_logits ||= v
+          elsif shape.size == 3 && shape[2] == 4
+            candidate_boxes ||= v
+          end
+        end
+        if candidate_logits && candidate_boxes
+          return extract_from_logits(candidate_logits, candidate_boxes)
+        end
+
+        # Tentativo 4: vecchio fallback by-shape su 1D/2D.
+        out.each do |_name, v|
+          shape = array_shape(v)
+          case shape.size
+          when 1
+            if v.first.is_a?(Integer)
+              labels ||= v
+            else
+              scores ||= v
             end
+          when 2
+            boxes ||= v if shape[1] == 4
           end
         end
 
-        # I tensori onnxruntime-ruby vengono restituiti come array innestati.
-        # Spesso il batch dim è presente: [[...]] invece di [...].
-        labels = unwrap_batch(labels)
-        boxes  = unwrap_batch(boxes)
-        scores = unwrap_batch(scores)
+        [unwrap_batch(labels), unwrap_batch(boxes), unwrap_batch(scores)]
+      end
+
+      # Da [B, Q, C] logits + [B, Q, 4] pred_boxes → tre array allineati
+      # (labels, boxes, scores) con argmax e sigmoid per query.
+      def extract_from_logits(logits_tensor, boxes_tensor)
+        logits = unwrap_batch(logits_tensor)
+        boxes  = unwrap_batch(boxes_tensor)
+        return [nil, nil, nil] unless logits.is_a?(Array) && logits.first.is_a?(Array)
+
+        labels = []
+        scores = []
+        logits.each do |query_logits|
+          best_idx = 0
+          best_logit = query_logits[0]
+          query_logits.each_with_index do |l, i|
+            if l > best_logit
+              best_logit = l
+              best_idx = i
+            end
+          end
+          labels << best_idx
+          # Sigmoid: RT-DETRv2 usa focal loss, classi indipendenti.
+          scores << sigmoid(best_logit)
+        end
+
         [labels, boxes, scores]
+      end
+
+      def sigmoid(x)
+        1.0 / (1.0 + Math.exp(-x))
       end
 
       def unwrap_batch(arr)
@@ -316,7 +378,19 @@ module RbDocling
         # Da pixel di rendering a punti PDF
         px_per_pt_x = pad_info[:orig_w].to_f / orig_w_pt
         px_per_pt_y = pad_info[:orig_h].to_f / orig_h_pt
-        [x0 / px_per_pt_x, y0 / px_per_pt_y, x1 / px_per_pt_x, y1 / px_per_pt_y]
+        x0_pt = x0 / px_per_pt_x
+        y0_pt = y0 / px_per_pt_y
+        x1_pt = x1 / px_per_pt_x
+        y1_pt = y1 / px_per_pt_y
+
+        # Clip ai limiti della pagina (il detector può sforare di qualche
+        # pixel sui bordi; senza clip page.text_in_bbox ritorna risultati
+        # incompleti o fallisce).
+        x0_pt = x0_pt.clamp(0.0, orig_w_pt)
+        x1_pt = x1_pt.clamp(0.0, orig_w_pt)
+        y0_pt = y0_pt.clamp(0.0, orig_h_pt)
+        y1_pt = y1_pt.clamp(0.0, orig_h_pt)
+        [x0_pt, y0_pt, x1_pt, y1_pt]
       end
 
       def detect_box_format(box, size)
